@@ -804,12 +804,55 @@
         weight: 0,
         targetWeight: 0,
         autoDetectingPayment: false,
+        serialMessage: "Waiting for a bill or coin signal...",
       };
       let muted = false;
       let dispenseTimer = null;
       let serialPort = null;
       let serialReader = null;
       let serialWriter = null;
+      let serialTextBuffer = "";
+      let serialConnected = false;
+
+      async function sendSerialCommand(command) {
+        if (!serialPort || !serialPort.writable) {
+          return false;
+        }
+
+        if (!serialWriter) {
+          serialWriter = serialPort.writable.getWriter();
+        }
+        await serialWriter.write(new TextEncoder().encode(`${command}\n`));
+        return true;
+      }
+
+      function finishDispensing() {
+        clearInterval(dispenseTimer);
+        const r = RICE[state.rice];
+        state.weight = state.targetWeight;
+        say(
+          `Done! ${(state.targetWeight * 1000).toFixed(0)} grams of ${r.name} dispensed. Thank you for your purchase.`,
+        );
+        state.step = "done";
+
+        const transaction = {
+          id:
+            "kiosk_" +
+            Date.now() +
+            "_" +
+            Math.random().toString(36).substr(2, 9),
+          variety: r.name,
+          kilos: parseFloat(state.targetWeight.toFixed(2)),
+          pricePerKilo: r.price,
+          paymentMethod: "Cash",
+          total: state.amount,
+          timestamp: Date.now(),
+        };
+        if (typeof SHARED_DATA !== "undefined") {
+          SHARED_DATA.saveKioskTransaction(transaction);
+        }
+        renderScreen();
+      }
 
       async function connectSerial() {
         if (!("serial" in navigator)) {
@@ -823,6 +866,8 @@
           serialPort = await navigator.serial.requestPort();
           await serialPort.open({ baudRate: 9600 });
           serialReader = serialPort.readable.getReader();
+          serialWriter = serialPort.writable.getWriter();
+          serialConnected = true;
           state.autoDetectingPayment = true;
           renderScreen();
           say("Cash acceptor connected.");
@@ -831,36 +876,83 @@
             const { value, done } = await serialReader.read();
             if (done) break;
 
-            const text = new TextDecoder().decode(value);
-            const lines = text.split(/\r?\n/);
+            serialTextBuffer += new TextDecoder().decode(value);
+            const lines = serialTextBuffer.split(/\r?\n/);
+            serialTextBuffer = lines.pop() || "";
 
             for (const line of lines) {
               if (!line.trim()) continue;
 
-              const coinMatch = line.match(
-                /Coin:\s*(\d+)\s*pulse\(s\)\s*->\s*P(\d+)\s*Total\s*=\s*P(\d+)/i,
+              const paymentMatch = line.match(
+                /^(?:COIN|BILL):\s*(?:PHP\s*)?(\d+)/i,
               );
-              const billMatch = line.match(
-                /Bill:\s*(\d+)\s*pulse\(s\)\s*->\s*P(\d+)\s*Total\s*=\s*P(\d+)/i,
+              const totalMatch = line.match(
+                /^(?:TOTAL:\s*(?:PHP\s*)?|Total Money:\s*PHP\s*)(\d+)/i,
               );
-              const totalMatch = line.match(/Total\s*=\s*P(\d+)/i);
+              const weightMatch = line.match(/^WEIGHT:\s*([\d.]+)/i);
 
-              if (coinMatch || billMatch || totalMatch) {
-                const total = Number(
-                  (coinMatch || billMatch || totalMatch)[3] ||
-                    (coinMatch || billMatch || totalMatch)[2] ||
-                    0,
-                );
+              if (paymentMatch || totalMatch) {
+                const total = totalMatch
+                  ? Number(totalMatch[1])
+                  : Number(paymentMatch[1]);
                 if (state.step === "pay") {
-                  state.amount = total;
+                  state.amount = totalMatch ? total : state.amount + total;
                   state.autoDetectingPayment = true;
                   renderScreen();
                 }
+              }
+
+              const billPulseMatch = line.match(
+                /^(?:BILL_PULSES:|Bill Pulse:)\s*(\d+)/i,
+              );
+              const coinPulseMatch = line.match(
+                /^(?:COIN_PULSES:|Coin Pulse:)\s*(\d+)/i,
+              );
+              if (billPulseMatch || coinPulseMatch) {
+                const type = billPulseMatch ? "bill" : "coin";
+                const pulses = Number((billPulseMatch || coinPulseMatch)[1]);
+                state.serialMessage = `${type} signal received: ${pulses} pulse(s)`;
+                renderScreen();
+              }
+
+              if (weightMatch && state.step === "dispense") {
+                state.weight = Number(weightMatch[1]);
+                renderScreen();
+              }
+
+              const motorStartMatch = line.match(/^MOTOR_START:\s*(\d+)/i);
+              if (motorStartMatch && state.step === "dispense") {
+                state.serialMessage = `Motor ${motorStartMatch[1]} started`;
+                renderScreen();
+              }
+
+              if (
+                /^CYCLE_DONE$/i.test(line.trim()) &&
+                state.step === "dispense"
+              ) {
+                finishDispensing();
+              }
+
+              if (/^ERROR:/i.test(line.trim())) {
+                say(line.trim());
               }
             }
           }
         } catch (err) {
           console.error("Serial connection failed:", err);
+          serialConnected = false;
+          if (serialWriter) {
+            try {
+              serialWriter.releaseLock();
+            } catch (_) {}
+          }
+          if (serialReader) {
+            try {
+              serialReader.releaseLock();
+            } catch (_) {}
+          }
+          serialWriter = null;
+          serialReader = null;
           say(
             "Unable to connect to the cash acceptor. Check the Arduino connection and try again.",
           );
@@ -1033,7 +1125,7 @@
           ? "Detecting inserted coins and bills..."
           : state.amount > 0
             ? "Payment is being read automatically from the acceptors."
-            : "Awaiting coins or bills to be inserted.";
+            : state.serialMessage;
 
         return `
     <div class="eyebrow">Step 2 of 4</div>
@@ -1144,6 +1236,7 @@
           state.step = "pay";
           state.amount = 0;
           state.autoDetectingPayment = false;
+          state.serialMessage = "Waiting for a bill or coin signal...";
           say(
             "Insert coins or bills. The system will detect the total automatically.",
           );
@@ -1178,6 +1271,7 @@
             weight: 0,
             targetWeight: 0,
             autoDetectingPayment: false,
+            serialMessage: "Waiting for a bill or coin signal...",
           };
           say("Tap the screen to begin your rice purchase.");
         }
@@ -1186,6 +1280,18 @@
       }
 
       function startDispensing() {
+        if (serialPort) {
+          sendSerialCommand(
+            `DISPENSE:${RICE[state.rice].name}:${state.targetWeight.toFixed(2)}`,
+          ).catch((err) => {
+            console.error("Failed to start dispenser:", err);
+            say(
+              "The dispenser could not be started. Check the Arduino connection.",
+            );
+          });
+          return;
+        }
+
         const targetGrams = state.targetWeight * 1000;
         const durationMs = 3600;
         const stepMs = 60;
@@ -1200,33 +1306,7 @@
           state.weight = targetGrams * eased;
           renderScreen();
           if (t >= 1) {
-            clearInterval(dispenseTimer);
-            state.weight = targetGrams;
-            const r = RICE[state.rice];
-            say(
-              `Done! ${targetGrams.toFixed(0)} grams of ${r.name} dispensed. Thank you for your purchase.`,
-            );
-            state.step = "done";
-
-            // Save transaction to shared storage for control panel
-            const transaction = {
-              id:
-                "kiosk_" +
-                Date.now() +
-                "_" +
-                Math.random().toString(36).substr(2, 9),
-              variety: r.name,
-              kilos: parseFloat((state.weight / 1000).toFixed(2)),
-              pricePerKilo: r.price,
-              paymentMethod: "Cash",
-              total: state.amount,
-              timestamp: Date.now(),
-            };
-            if (typeof SHARED_DATA !== "undefined") {
-              SHARED_DATA.saveKioskTransaction(transaction);
-            }
-
-            renderScreen();
+            finishDispensing();
           }
         }, stepMs);
       }
