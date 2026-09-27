@@ -803,6 +803,8 @@
         containerPlaced: false,
         weight: 0,
         targetWeight: 0,
+        paymentTransactionId: null,
+        paymentTimestamp: null,
         autoDetectingPayment: false,
         serialMessage: "Waiting for a bill or coin signal...",
       };
@@ -826,27 +828,60 @@
         return true;
       }
 
+      function recordPaymentProgress() {
+        if (
+          typeof SHARED_DATA === "undefined" ||
+          !state.rice ||
+          state.amount <= 0
+        ) {
+          return;
+        }
+
+        if (!state.paymentTransactionId) {
+          state.paymentTransactionId =
+            "kiosk_" +
+            Date.now() +
+            "_" +
+            Math.random().toString(36).substr(2, 9);
+          state.paymentTimestamp = Date.now();
+        }
+
+        const rice = RICE[state.rice];
+        SHARED_DATA.saveKioskPayment({
+          id: state.paymentTransactionId,
+          variety: rice.name,
+          kilos: Number((state.amount / rice.price).toFixed(2)),
+          pricePerKilo: rice.price,
+          paymentMethod: "Cash",
+          total: state.amount,
+          timestamp: state.paymentTimestamp,
+          status: "pending",
+        });
+      }
+
       function finishDispensing() {
         clearInterval(dispenseTimer);
         const r = RICE[state.rice];
-        state.weight = state.targetWeight;
+        state.weight = Number(state.targetWeight.toFixed(2));
         say(
-          `Done! ${(state.targetWeight * 1000).toFixed(0)} grams of ${r.name} dispensed. Thank you for your purchase.`,
+          `Done! ${state.targetWeight.toFixed(2)} kg of ${r.name} dispensed. Thank you for your purchase.`,
         );
         state.step = "done";
 
         const transaction = {
           id:
+            state.paymentTransactionId ||
             "kiosk_" +
-            Date.now() +
-            "_" +
-            Math.random().toString(36).substr(2, 9),
+              Date.now() +
+              "_" +
+              Math.random().toString(36).substr(2, 9),
           variety: r.name,
           kilos: parseFloat(state.targetWeight.toFixed(2)),
           pricePerKilo: r.price,
           paymentMethod: "Cash",
           total: state.amount,
-          timestamp: Date.now(),
+          timestamp: state.paymentTimestamp || Date.now(),
+          status: "completed",
         };
         if (typeof SHARED_DATA !== "undefined") {
           SHARED_DATA.saveKioskTransaction(transaction);
@@ -896,8 +931,10 @@
                   ? Number(totalMatch[1])
                   : Number(paymentMatch[1]);
                 if (state.step === "pay") {
+                  const previousAmount = state.amount;
                   state.amount = totalMatch ? total : state.amount + total;
                   state.autoDetectingPayment = true;
+                  if (state.amount !== previousAmount) recordPaymentProgress();
                   renderScreen();
                 }
               }
@@ -916,7 +953,8 @@
               }
 
               if (weightMatch && state.step === "dispense") {
-                state.weight = Number(weightMatch[1]);
+                const grams = Number(weightMatch[1]);
+                state.weight = Number((grams / 1000).toFixed(2));
                 renderScreen();
               }
 
@@ -1047,7 +1085,7 @@
         <circle cx="22" cy="56" r="2.6" fill="#D9A94C"/>
       </svg>
       <div>
-        <h1 class="step-title" style="text-align:center">Fresh rice,<br>measured to the gram.</h1>
+        <h1 class="step-title" style="text-align:center">Fresh rice,<br>measured by the kilo.</h1>
         <p class="step-sub" style="text-align:center">Insert ₱20–₱100 in coins or bills. We'll guide you by voice the whole way.</p>
       </div>
       <button class="tap-btn" data-action="start">Tap to start</button>
@@ -1170,8 +1208,8 @@
     <p class="step-sub">Please wait — the motor stops automatically once the target weight is reached.</p>
     <div class="jar-stage">
       <div class="jar"><div class="jar-fill" style="height:${pct}%; background-color:${r.color}"></div></div>
-      <div class="weight-readout">${state.weight.toFixed(0)} g</div>
-      <div class="weight-target">target ${(state.targetWeight * 1000).toFixed(0)} g</div>
+      <div class="weight-readout">${Number(state.weight || 0).toFixed(2)} kg</div>
+      <div class="weight-target">target ${state.targetWeight.toFixed(2)} kg</div>
       <div class="motor-status">${pct < 100 ? "● motor running" : "● motor stopped"}</div>
     </div>
   `;
@@ -1193,7 +1231,7 @@
     <div class="receipt">
       <div class="receipt-row"><span>Rice type</span><span>${r.name}</span></div>
       <div class="receipt-row"><span>Amount paid</span><span>₱${state.amount}.00</span></div>
-      <div class="receipt-row"><span>Weight dispensed</span><span>${state.weight.toFixed(0)} g</span></div>
+      <div class="receipt-row"><span>Weight dispensed</span><span>${Number(state.weight || 0).toFixed(2)} kg</span></div>
       <div class="receipt-row"><span>Time</span><span>${ts}</span></div>
       <div class="receipt-row"><span>Total</span><span>Paid in full</span></div>
     </div>
@@ -1235,8 +1273,15 @@
           }
           state.step = "pay";
           state.amount = 0;
+          state.paymentTransactionId = null;
+          state.paymentTimestamp = null;
           state.autoDetectingPayment = false;
           state.serialMessage = "Waiting for a bill or coin signal...";
+          if (serialPort) {
+            sendSerialCommand("RESET_TOTAL").catch((err) => {
+              console.warn("Could not reset the acceptor total:", err);
+            });
+          }
           say(
             "Insert coins or bills. The system will detect the total automatically.",
           );
@@ -1244,6 +1289,9 @@
           const r = RICE[state.rice];
           const minimumPayment = r.price * MIN_QUANTITY_KG;
           if (state.amount < minimumPayment || state.amount > MAX_PAYMENT) {
+            say(
+              `The minimum order is 1 kilogram. Please insert at least ₱${minimumPayment}.`,
+            );
             return;
           }
           state.targetWeight = state.amount / r.price;
@@ -1270,6 +1318,8 @@
             containerPlaced: false,
             weight: 0,
             targetWeight: 0,
+            paymentTransactionId: null,
+            paymentTimestamp: null,
             autoDetectingPayment: false,
             serialMessage: "Waiting for a bill or coin signal...",
           };
@@ -1292,7 +1342,7 @@
           return;
         }
 
-        const targetGrams = state.targetWeight * 1000;
+        const targetKg = Number(state.targetWeight || 0);
         const durationMs = 3600;
         const stepMs = 60;
         const totalSteps = durationMs / stepMs;
@@ -1303,7 +1353,7 @@
           // ease-out curve so it settles precisely at target
           const t = Math.min(1, i / totalSteps);
           const eased = 1 - Math.pow(1 - t, 2);
-          state.weight = targetGrams * eased;
+          state.weight = Number((targetKg * eased).toFixed(2));
           renderScreen();
           if (t >= 1) {
             finishDispensing();

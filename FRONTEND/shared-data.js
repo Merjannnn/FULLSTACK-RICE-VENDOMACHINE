@@ -10,6 +10,7 @@ const SHARED_DATA = {
   KIOSK_TRANSACTIONS_KEY: "bigasan_kiosk_transactions",
   CONTROL_PANEL_STATE_KEY: "bigasan_control_panel_state",
   RICE_INVENTORY_KEY: "bigasan_rice_inventory",
+  transactionSyncQueue: Promise.resolve(),
 
   async apiRequest(path, options = {}) {
     try {
@@ -286,46 +287,23 @@ const SHARED_DATA = {
   },
 
   /**
-   * Save a kiosk transaction to shared storage
-   * @param {Object} transaction - Transaction data from kiosk
+   * Save or update a kiosk transaction in shared local storage.
    */
-  async saveKioskTransaction(transaction) {
+  storeKioskTransaction(transaction) {
     const payload = {
       ...transaction,
       source: "kiosk",
       syncedAt: Date.now(),
+      updatedAt: Date.now(),
     };
 
     try {
-      const inventory = await this.fetchInventory();
-      const match = Object.values(inventory).find(
-        (item) => item.name === payload.variety,
-      );
-      const apiPayload = {
-        rice_type_id: match ? Number(match.rice_type_id || 1) : 1,
-        quantity_bought: Number(payload.kilos || 0),
-        price_per_unit: Number(payload.pricePerKilo || 0),
-        payment_method: payload.paymentMethod || "cash",
-      };
-
-      const response = await this.apiRequest("/transactions", {
-        method: "POST",
-        body: JSON.stringify(apiPayload),
-      });
-
-      if (response && response.success) {
-        payload.apiId = response.transaction_id;
-      }
-    } catch (error) {
-      console.warn(
-        "Backend transaction save failed, continuing with local storage:",
-        error,
-      );
-    }
-
-    try {
       const existing = this.getKioskTransactions();
-      existing.push(payload);
+      const existingIndex = existing.findIndex(
+        (item) => item.id === payload.id,
+      );
+      if (existingIndex === -1) existing.push(payload);
+      else existing[existingIndex] = { ...existing[existingIndex], ...payload };
       localStorage.setItem(
         this.KIOSK_TRANSACTIONS_KEY,
         JSON.stringify(existing),
@@ -335,11 +313,75 @@ const SHARED_DATA = {
         new CustomEvent("bigasan_transaction_saved", { detail: payload }),
       );
 
-      return true;
+      return payload;
     } catch (e) {
       console.error("Failed to save kiosk transaction:", e);
-      return false;
+      return null;
     }
+  },
+
+  queueKioskTransactionSync(transactionId) {
+    this.transactionSyncQueue = this.transactionSyncQueue
+      .catch(() => {})
+      .then(async () => {
+        const current = this.getKioskTransactions().find(
+          (item) => item.id === transactionId,
+        );
+        if (!current) return;
+
+        const inventory = await this.fetchInventory();
+        const match = Object.values(inventory).find(
+          (item) => item.name === current.variety,
+        );
+        const apiPayload = {
+          rice_type_id: match ? Number(match.rice_type_id || 1) : 1,
+          quantity_bought: Number(current.kilos || 0),
+          price_per_unit: Number(current.pricePerKilo || 0),
+          payment_method: current.paymentMethod || "cash",
+          transaction_status: current.status || "completed",
+        };
+
+        const response = current.apiId
+          ? await this.apiRequest(`/transactions/${current.apiId}`, {
+              method: "PUT",
+              body: JSON.stringify(apiPayload),
+            })
+          : await this.apiRequest("/transactions", {
+              method: "POST",
+              body: JSON.stringify(apiPayload),
+            });
+
+        if (!response?.success || current.apiId) return;
+        const latest = this.getKioskTransactions().find(
+          (item) => item.id === transactionId,
+        );
+        if (latest) {
+          this.storeKioskTransaction({
+            ...latest,
+            apiId: response.transaction_id,
+          });
+        }
+      });
+    return this.transactionSyncQueue;
+  },
+
+  saveKioskPayment(transaction) {
+    const payload = this.storeKioskTransaction({
+      ...transaction,
+      status: "pending",
+    });
+    if (payload) this.queueKioskTransactionSync(payload.id);
+    return Boolean(payload);
+  },
+
+  async saveKioskTransaction(transaction) {
+    const payload = this.storeKioskTransaction({
+      ...transaction,
+      status: "completed",
+    });
+    if (!payload) return false;
+    await this.queueKioskTransactionSync(payload.id);
+    return true;
   },
 
   /**
@@ -380,7 +422,15 @@ const SHARED_DATA = {
       if (e.key !== this.KIOSK_TRANSACTIONS_KEY || !e.newValue) return;
       try {
         const transactions = JSON.parse(e.newValue);
-        const latest = transactions[transactions.length - 1];
+        const latest = transactions.reduce(
+          (mostRecent, transaction) =>
+            !mostRecent ||
+            (transaction.updatedAt || transaction.timestamp) >
+              (mostRecent.updatedAt || mostRecent.timestamp)
+              ? transaction
+              : mostRecent,
+          null,
+        );
         if (latest) {
           fire(latest);
         }
@@ -406,11 +456,15 @@ const SHARED_DATA = {
 
     // Add any kiosk transactions that aren't already in the panel
     kioskTransactions.forEach((kt) => {
-      const exists = controlPanelState.transactions.some(
+      const existingIndex = controlPanelState.transactions.findIndex(
         (pt) => pt.id === kt.id,
       );
-      if (!exists) {
-        controlPanelState.transactions.push(kt);
+      if (existingIndex === -1) controlPanelState.transactions.push(kt);
+      else {
+        controlPanelState.transactions[existingIndex] = {
+          ...controlPanelState.transactions[existingIndex],
+          ...kt,
+        };
       }
     });
 

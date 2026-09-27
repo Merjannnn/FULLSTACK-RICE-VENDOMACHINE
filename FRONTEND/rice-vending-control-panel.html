@@ -512,6 +512,19 @@
         background: #f1e5d0;
         color: var(--warn);
       }
+      .pill-pending {
+        background: #f8edcf;
+        color: #755314;
+      }
+      .pill-completed {
+        background: #e4eedd;
+        color: var(--green-deep);
+      }
+      .stat-note {
+        margin-top: 4px;
+        color: var(--ink-soft);
+        font-size: 12px;
+      }
       .empty-state {
         text-align: center;
         padding: 50px 20px;
@@ -1087,14 +1100,20 @@
       // Listen for real-time kiosk transactions
       if (typeof SHARED_DATA !== "undefined") {
         SHARED_DATA.onKioskTransaction((transaction) => {
-          // Add new transaction to STATE if not already present
-          if (!STATE.transactions.some((t) => t.id === transaction.id)) {
+          const existingIndex = STATE.transactions.findIndex(
+            (item) => item.id === transaction.id,
+          );
+          if (existingIndex === -1) {
             STATE.transactions.push(transaction);
-            saveState(STATE);
-            // If on transactions tab, re-render
-            if (currentTab === "transactions") {
-              renderTransactions();
-            }
+          } else {
+            STATE.transactions[existingIndex] = {
+              ...STATE.transactions[existingIndex],
+              ...transaction,
+            };
+          }
+          localStorage.setItem(LS_STATE_KEY, JSON.stringify(STATE));
+          if (currentTab === "transactions") {
+            renderTransactions();
           }
         });
       }
@@ -1336,15 +1355,23 @@
         return "pill-card";
       }
 
+      function transactionStatusPillClass(status) {
+        return status === "pending" ? "pill-pending" : "pill-completed";
+      }
+
       function renderTransactions() {
         const sorted = [...STATE.transactions].sort(
           (a, b) => b.timestamp - a.timestamp,
         );
-        const totalEarnings = STATE.transactions.reduce(
-          (s, t) => s + t.total,
-          0,
+        const completed = sorted.filter(
+          (transaction) =>
+            !transaction.status || transaction.status === "completed",
         );
-        const totalKilos = STATE.transactions.reduce((s, t) => s + t.kilos, 0);
+        const pendingCount = sorted.filter(
+          (transaction) => transaction.status === "pending",
+        ).length;
+        const totalEarnings = completed.reduce((s, t) => s + t.total, 0);
+        const totalKilos = completed.reduce((s, t) => s + t.kilos, 0);
 
         const containerOptions = STATE.containers
           .map(
@@ -1362,6 +1389,7 @@
       <td class="mono">${t.kilos} kg</td>
       <td class="mono">₱${t.pricePerKilo.toFixed(2)}</td>
       <td><span class="pill ${paymentPillClass(t.paymentMethod)}">${t.paymentMethod}</span></td>
+      <td><span class="pill ${transactionStatusPillClass(t.status || "completed")}">${t.status === "pending" ? "Pending payment" : "Completed"}</span></td>
       <td class="mono"><strong>₱${t.total.toFixed(2)}</strong></td>
       <td class="mono" style="color:var(--ink-soft); font-size:12.5px;">${formatDateTime(t.timestamp)}</td>
       <td>
@@ -1383,7 +1411,7 @@
       </div>
       <table>
         <thead>
-          <tr><th><input class="transaction-select" type="checkbox" onchange="toggleAllTransactions(this)" aria-label="Select all transactions"></th><th>Variety</th><th>Kilos</th><th>Price / kg</th><th>Payment</th><th>Total</th><th>Timestamp</th><th>Action</th></tr>
+          <tr><th><input class="transaction-select" type="checkbox" onchange="toggleAllTransactions(this)" aria-label="Select all transactions"></th><th>Variety</th><th>Kilos</th><th>Price / kg</th><th>Payment</th><th>Status</th><th>Total</th><th>Timestamp</th><th>Action</th></tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
@@ -1421,7 +1449,8 @@
       </div>
       <div class="stat-card">
         <div class="label">Recorded Sales</div>
-        <div class="value">${sorted.length}</div>
+        <div class="value">${completed.length}</div>
+        ${pendingCount ? `<div class="stat-note">${pendingCount} pending payment${pendingCount === 1 ? "" : "s"}</div>` : ""}
       </div>
     </div>
 
@@ -1432,7 +1461,7 @@
       </div>
       <div class="field">
         <label for="rf-kilos">Kilos</label>
-        <input type="number" id="rf-kilos" min="0.1" step="0.1" value="1" oninput="updateComputedTotal()">
+        <input type="number" id="rf-kilos" min="1" step="0.1" value="1" oninput="updateComputedTotal()">
       </div>
       <div class="field">
         <label for="rf-payment">Payment</label>
@@ -1612,8 +1641,8 @@
           document.getElementById("rf-timestamp").value,
         ).getTime();
         const c = STATE.containers.find((x) => x.id === containerId);
-        if (!c || !kilos || kilos <= 0 || Number.isNaN(timestamp)) {
-          showToast("Enter a valid amount of kilos.");
+        if (!c || !kilos || kilos < 1 || Number.isNaN(timestamp)) {
+          showToast("Minimum sale is 1 kg.");
           return;
         }
         if (kilos > c.stock) {

@@ -68,7 +68,7 @@ async function setupDatabase() {
       CREATE TABLE IF NOT EXISTS transactions (
         id INT AUTO_INCREMENT PRIMARY KEY,
         rice_type_id INT NOT NULL,
-        quantity_bought INT NOT NULL,
+        quantity_bought DECIMAL(10, 2) NOT NULL,
         price_per_unit DECIMAL(10, 2) NOT NULL,
         total_price DECIMAL(10, 2) NOT NULL,
         payment_method VARCHAR(50),
@@ -81,6 +81,10 @@ async function setupDatabase() {
       );
     `);
     console.log("✓ transactions table created");
+    await connection.query(
+      "ALTER TABLE transactions MODIFY quantity_bought DECIMAL(10, 2) NOT NULL",
+    );
+    console.log("✓ transaction quantities support fractional kilograms");
 
     // Operators/Users Table
     await connection.query(`

@@ -159,6 +159,7 @@ PUT    /api/inventory/:id          # Update inventory (stock/price)
 
 ```
 POST   /api/transactions           # Record new transaction
+PUT    /api/transactions/:id       # Update pending payment / complete sale
 GET    /api/transactions           # Get transactions (with filters)
 GET    /api/transactions/stats/daily  # Get daily sales stats
 ```
