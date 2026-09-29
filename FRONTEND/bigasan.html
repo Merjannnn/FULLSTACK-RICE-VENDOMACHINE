@@ -1381,6 +1381,8 @@
           renderScreen();
         });
         syncRiceInventoryFromShared();
+        SHARED_DATA.syncUnsyncedKioskTransactions();
+        setInterval(() => SHARED_DATA.syncUnsyncedKioskTransactions(), 5000);
         SHARED_DATA.fetchInventory().then((inventory) => {
           if (inventory) {
             Object.keys(RICE).forEach((key) => {

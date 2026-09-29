@@ -67,6 +67,7 @@ async function setupDatabase() {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS transactions (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        client_transaction_id VARCHAR(100) NULL,
         rice_type_id INT NOT NULL,
         quantity_bought DECIMAL(10, 2) NOT NULL,
         price_per_unit DECIMAL(10, 2) NOT NULL,
@@ -76,11 +77,29 @@ async function setupDatabase() {
         transaction_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (rice_type_id) REFERENCES rice_types(id) ON DELETE RESTRICT,
+        UNIQUE KEY uq_transactions_client_id (client_transaction_id),
         INDEX idx_timestamp (transaction_timestamp),
         INDEX idx_status (transaction_status)
       );
     `);
     console.log("✓ transactions table created");
+    const [clientIdColumns] = await connection.query(
+      "SHOW COLUMNS FROM transactions LIKE 'client_transaction_id'",
+    );
+    if (clientIdColumns.length === 0) {
+      await connection.query(
+        "ALTER TABLE transactions ADD COLUMN client_transaction_id VARCHAR(100) NULL",
+      );
+    }
+    const [clientIdIndexes] = await connection.query(
+      "SHOW INDEX FROM transactions WHERE Key_name = 'uq_transactions_client_id'",
+    );
+    if (clientIdIndexes.length === 0) {
+      await connection.query(
+        "ALTER TABLE transactions ADD UNIQUE KEY uq_transactions_client_id (client_transaction_id)",
+      );
+    }
+    console.log("✓ transaction client IDs are unique");
     await connection.query(
       "ALTER TABLE transactions MODIFY quantity_bought DECIMAL(10, 2) NOT NULL",
     );

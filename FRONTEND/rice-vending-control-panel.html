@@ -976,6 +976,7 @@
       const LOCK_MS = 30000;
 
       let currentTab = "transactions";
+      let transactionRefreshTimer = null;
 
       /* =========================================================
    STATE
@@ -1055,10 +1056,19 @@
           const raw = localStorage.getItem(LS_STATE_KEY);
           if (!raw) {
             const d = defaultState();
+            recoverMissingReceipt(d);
             saveState(d);
+            if (
+              localStorage.getItem("rvm_recovered_receipt_20260928_2246_v2") !==
+              "deleted"
+            )
+              localStorage.setItem(
+                "rvm_recovered_receipt_20260928_2246_v2",
+                "done",
+              );
             return d;
           }
-          const parsed = JSON.parse(raw);
+          let parsed = JSON.parse(raw);
           if (!parsed.containers || !parsed.transactions)
             throw new Error("bad shape");
 
@@ -1080,14 +1090,75 @@
             parsed = SHARED_DATA.syncKioskTransactionsToPanel(parsed);
           }
 
+          recoverMissingReceipt(parsed);
           saveState(parsed);
+          if (
+            localStorage.getItem("rvm_recovered_receipt_20260928_2246_v2") !==
+            "deleted"
+          )
+            localStorage.setItem(
+              "rvm_recovered_receipt_20260928_2246_v2",
+              "done",
+            );
           return parsed;
         } catch (e) {
+          console.error("Failed to load control panel state:", e);
           const d = defaultState();
+          recoverMissingReceipt(d);
           saveState(d);
+          if (
+            localStorage.getItem("rvm_recovered_receipt_20260928_2246_v2") !==
+            "deleted"
+          )
+            localStorage.setItem(
+              "rvm_recovered_receipt_20260928_2246_v2",
+              "done",
+            );
           return d;
         }
       }
+      function recoverMissingReceipt(state) {
+        const migrationKey = "rvm_recovered_receipt_20260928_2246_v2";
+        if (localStorage.getItem(migrationKey) === "deleted") return;
+        const previousMigrationAttempt =
+          localStorage.getItem("rvm_recovered_receipt_20260928_2246_v1") ===
+            "done" || localStorage.getItem(migrationKey) === "done";
+
+        const recoveredTransaction = {
+          id: "recovered_kiosk_20260928_2246_jasmine",
+          variety: "Jasmine",
+          kilos: 1.82,
+          pricePerKilo: 55,
+          paymentMethod: "Cash",
+          total: 100,
+          timestamp: new Date(2026, 8, 28, 22, 46).getTime(),
+          status: "completed",
+        };
+        const matchingTransaction = state.transactions.some(
+          (transaction) =>
+            transaction.id === recoveredTransaction.id ||
+            (transaction.variety === recoveredTransaction.variety &&
+              Number(transaction.kilos) === recoveredTransaction.kilos &&
+              Number(transaction.total) === recoveredTransaction.total &&
+              Math.abs(
+                transaction.timestamp - recoveredTransaction.timestamp,
+              ) <=
+                5 * 60 * 1000),
+        );
+        if (!matchingTransaction) {
+          state.transactions.push(recoveredTransaction);
+          const jasmine = state.containers.find(
+            (container) => container.name === "Jasmine",
+          );
+          if (jasmine && !previousMigrationAttempt) {
+            jasmine.stock = Math.max(
+              0,
+              Number((jasmine.stock - recoveredTransaction.kilos).toFixed(2)),
+            );
+          }
+        }
+      }
+
       function saveState(state) {
         localStorage.setItem(LS_STATE_KEY, JSON.stringify(state));
         if (typeof SHARED_DATA !== "undefined") {
@@ -1100,22 +1171,72 @@
       // Listen for real-time kiosk transactions
       if (typeof SHARED_DATA !== "undefined") {
         SHARED_DATA.onKioskTransaction((transaction) => {
-          const existingIndex = STATE.transactions.findIndex(
-            (item) => item.id === transaction.id,
-          );
-          if (existingIndex === -1) {
-            STATE.transactions.push(transaction);
-          } else {
-            STATE.transactions[existingIndex] = {
-              ...STATE.transactions[existingIndex],
-              ...transaction,
-            };
-          }
+          STATE.transactions = mergeTransactions(STATE.transactions, [
+            transaction,
+          ]);
           localStorage.setItem(LS_STATE_KEY, JSON.stringify(STATE));
           if (currentTab === "transactions") {
             renderTransactions();
           }
         });
+      }
+
+      function mergeTransactions(existingTransactions, incomingTransactions) {
+        const merged = [...existingTransactions];
+
+        incomingTransactions.forEach((incoming) => {
+          const existingIndex = merged.findIndex(
+            (existing) =>
+              existing.id === incoming.id ||
+              (incoming.apiId &&
+                Number(existing.apiId) === Number(incoming.apiId)) ||
+              (incoming.clientTransactionId &&
+                existing.clientTransactionId === incoming.clientTransactionId),
+          );
+          if (existingIndex === -1) {
+            merged.push(incoming);
+            return;
+          }
+
+          merged[existingIndex] = {
+            ...merged[existingIndex],
+            ...incoming,
+          };
+        });
+
+        return merged;
+      }
+
+      async function refreshTransactionsFromBackend() {
+        if (typeof SHARED_DATA === "undefined") return;
+        const incoming = await SHARED_DATA.fetchTransactions();
+        if (!Array.isArray(incoming)) return;
+
+        const beforeCount = STATE.transactions.length;
+        const previousTransactions = STATE.transactions;
+        const merged = mergeTransactions(previousTransactions, incoming);
+        const changed =
+          merged.length !== beforeCount ||
+          merged.some((transaction, index) =>
+            [
+              "variety",
+              "kilos",
+              "pricePerKilo",
+              "total",
+              "paymentMethod",
+              "status",
+              "timestamp",
+              "apiId",
+            ].some(
+              (field) =>
+                transaction[field] !== previousTransactions[index]?.[field],
+            ),
+          );
+        if (!changed) return;
+
+        STATE.transactions = merged;
+        localStorage.setItem(LS_STATE_KEY, JSON.stringify(STATE));
+        if (currentTab === "transactions") renderTransactions();
       }
 
       /* =========================================================
@@ -1187,11 +1308,20 @@
       async function hydrateFromBackend() {
         if (typeof SHARED_DATA === "undefined") return;
 
-        const inventory = await SHARED_DATA.fetchInventory();
+        const [inventory, backendTransactions] = await Promise.all([
+          SHARED_DATA.fetchInventory(),
+          SHARED_DATA.fetchTransactions(),
+        ]);
         if (!inventory) return;
 
         const existing = loadState();
         const next = { ...existing, containers: existing.containers || [] };
+        if (Array.isArray(backendTransactions)) {
+          next.transactions = mergeTransactions(
+            next.transactions || [],
+            backendTransactions,
+          );
+        }
 
         next.containers = next.containers.map((container) => {
           const match =
@@ -1275,6 +1405,8 @@
       }
 
       function handleSignOut() {
+        clearInterval(transactionRefreshTimer);
+        transactionRefreshTimer = null;
         sessionStorage.removeItem(SS_AUTH_KEY);
         currentTab = "transactions";
         showLogin();
@@ -1290,6 +1422,11 @@
         await hydrateFromBackend();
         renderTabbar();
         renderTab();
+        clearInterval(transactionRefreshTimer);
+        transactionRefreshTimer = setInterval(
+          refreshTransactionsFromBackend,
+          3000,
+        );
       }
 
       /* =========================================================
@@ -1461,7 +1598,7 @@
       </div>
       <div class="field">
         <label for="rf-kilos">Kilos</label>
-        <input type="number" id="rf-kilos" min="1" step="0.1" value="1" oninput="updateComputedTotal()">
+        <input type="number" id="rf-kilos" min="1" step="0.01" value="1" oninput="updateComputedTotal()">
       </div>
       <div class="field">
         <label for="rf-payment">Payment</label>
@@ -1596,6 +1733,12 @@
           (transaction) => !selectedIds.includes(transaction.id),
         );
         saveState(STATE);
+        if (selectedIds.includes("recovered_kiosk_20260928_2246_jasmine")) {
+          localStorage.setItem(
+            "rvm_recovered_receipt_20260928_2246_v2",
+            "deleted",
+          );
+        }
         renderTransactions();
         renderTabbar();
         showToast(
@@ -1628,6 +1771,12 @@
           (item) => item.id !== transactionId,
         );
         saveState(STATE);
+        if (transactionId === "recovered_kiosk_20260928_2246_jasmine") {
+          localStorage.setItem(
+            "rvm_recovered_receipt_20260928_2246_v2",
+            "deleted",
+          );
+        }
         renderTransactions();
         renderTabbar();
         showToast("Transaction deleted.");

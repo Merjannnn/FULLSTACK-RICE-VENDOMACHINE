@@ -186,13 +186,17 @@ app.put("/api/inventory/:id", async (req, res) => {
  */
 app.post("/api/transactions", async (req, res) => {
   const {
+    client_transaction_id,
     rice_type_id,
     quantity_bought,
     price_per_unit,
+    total_price,
     payment_method,
     transaction_status = "completed",
+    transaction_timestamp,
   } = req.body;
 
+  let connection;
   try {
     // Validate required fields
     if (
@@ -208,59 +212,124 @@ app.post("/api/transactions", async (req, res) => {
       return res.status(400).json({ error: "Invalid transaction status" });
     }
 
-    const total_price = quantity_bought * price_per_unit;
+    const calculatedTotal = Number(
+      total_price ?? Number(quantity_bought) * Number(price_per_unit),
+    );
+    if (!Number.isFinite(calculatedTotal) || calculatedTotal <= 0) {
+      return res.status(400).json({ error: "Invalid transaction total" });
+    }
 
-    const [result] = await pool.query(
-      `
-      INSERT INTO transactions 
-      (rice_type_id, quantity_bought, price_per_unit, total_price, payment_method, transaction_status)
-      VALUES (?, ?, ?, ?, ?, ?);
-    `,
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    let existingTransaction = null;
+    if (client_transaction_id) {
+      const [existingRows] = await connection.query(
+        "SELECT id, rice_type_id, transaction_status FROM transactions WHERE client_transaction_id = ? FOR UPDATE",
+        [String(client_transaction_id)],
+      );
+      existingTransaction = existingRows[0] || null;
+    }
+
+    if (existingTransaction) {
+      if (
+        existingTransaction.transaction_status !== "completed" &&
+        transaction_status === "completed"
+      ) {
+        const [stockResult] = await connection.query(
+          "UPDATE rice_inventory SET stock = stock - ? WHERE rice_type_id = ? AND stock >= ?",
+          [quantity_bought, existingTransaction.rice_type_id, quantity_bought],
+        );
+        if (stockResult.affectedRows === 0) {
+          await connection.rollback();
+          return res
+            .status(409)
+            .json({ error: "Insufficient inventory stock" });
+        }
+      }
+
+      await connection.query(
+        `UPDATE transactions
+         SET quantity_bought = ?, price_per_unit = ?, total_price = ?, payment_method = ?, transaction_status = ?
+         WHERE id = ?`,
+        [
+          quantity_bought,
+          price_per_unit,
+          calculatedTotal,
+          payment_method || "cash",
+          transaction_status,
+          existingTransaction.id,
+        ],
+      );
+      await connection.commit();
+      return res.json({
+        success: true,
+        transaction_id: existingTransaction.id,
+        data: {
+          id: existingTransaction.id,
+          client_transaction_id: String(client_transaction_id),
+          rice_type_id,
+          quantity_bought,
+          price_per_unit,
+          total_price: calculatedTotal,
+          transaction_status,
+        },
+      });
+    }
+
+    const [result] = await connection.query(
+      `INSERT INTO transactions
+       (client_transaction_id, rice_type_id, quantity_bought, price_per_unit, total_price, payment_method, transaction_status, transaction_timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
       [
+        client_transaction_id ? String(client_transaction_id) : null,
         rice_type_id,
         quantity_bought,
         price_per_unit,
-        total_price,
+        calculatedTotal,
         payment_method || "cash",
         transaction_status,
+        transaction_timestamp || null,
       ],
     );
 
-    // Pending cash records are not sales and must not reduce stock.
     if (transaction_status === "completed") {
-      const [stockResult] = await pool.query(
-        `
-      UPDATE rice_inventory 
-      SET stock = stock - ? 
-      WHERE rice_type_id = ? AND stock >= ?;
-    `,
+      const [stockResult] = await connection.query(
+        "UPDATE rice_inventory SET stock = stock - ? WHERE rice_type_id = ? AND stock >= ?",
         [quantity_bought, rice_type_id, quantity_bought],
       );
       if (stockResult.affectedRows === 0) {
+        await connection.rollback();
         return res.status(409).json({ error: "Insufficient inventory stock" });
       }
     }
 
+    await connection.commit();
     res.json({
       success: true,
       transaction_id: result.insertId,
       data: {
         id: result.insertId,
+        client_transaction_id: client_transaction_id || null,
         rice_type_id,
         quantity_bought,
         price_per_unit,
-        total_price,
+        total_price: calculatedTotal,
         transaction_status,
       },
     });
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error("Error creating transaction:", error);
     res.status(500).json({ error: "Failed to create transaction" });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 app.put("/api/transactions/:id", async (req, res) => {
-  const { quantity_bought, price_per_unit, transaction_status } = req.body;
+  const { quantity_bought, price_per_unit, total_price, transaction_status } =
+    req.body;
   let connection;
 
   try {
@@ -311,7 +380,13 @@ app.put("/api/transactions/:id", async (req, res) => {
       }
     }
 
-    const total_price = Number(quantity_bought) * Number(price_per_unit);
+    const calculatedTotal = Number(
+      total_price ?? Number(quantity_bought) * Number(price_per_unit),
+    );
+    if (!Number.isFinite(calculatedTotal) || calculatedTotal <= 0) {
+      await connection.rollback();
+      return res.status(400).json({ error: "Invalid transaction total" });
+    }
     await connection.query(
       `UPDATE transactions
        SET quantity_bought = ?, price_per_unit = ?, total_price = ?, transaction_status = ?
@@ -319,7 +394,7 @@ app.put("/api/transactions/:id", async (req, res) => {
       [
         quantity_bought,
         price_per_unit,
-        total_price,
+        calculatedTotal,
         transaction_status,
         req.params.id,
       ],
@@ -351,6 +426,7 @@ app.get("/api/transactions", async (req, res) => {
       SELECT 
         t.id,
         t.rice_type_id,
+        t.client_transaction_id,
         rt.name as rice_type_name,
         t.quantity_bought,
         t.price_per_unit,

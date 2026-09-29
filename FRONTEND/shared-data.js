@@ -86,9 +86,26 @@ const SHARED_DATA = {
 
   async fetchTransactions() {
     const payload = await this.apiRequest("/transactions?limit=200&offset=0");
-    if (!payload || !Array.isArray(payload.data))
-      return this.getKioskTransactions();
-    return payload.data;
+    if (!payload || !Array.isArray(payload.data)) return null;
+
+    return payload.data.map((transaction) => {
+      const timestamp = new Date(transaction.transaction_timestamp).getTime();
+      return {
+        id: transaction.client_transaction_id || `api_${transaction.id}`,
+        apiId: Number(transaction.id),
+        clientTransactionId: transaction.client_transaction_id || null,
+        variety: transaction.rice_type_name,
+        kilos: Number(transaction.quantity_bought),
+        pricePerKilo: Number(transaction.price_per_unit),
+        total: Number(transaction.total_price),
+        paymentMethod: String(transaction.payment_method || "Cash").replace(
+          /^./,
+          (char) => char.toUpperCase(),
+        ),
+        status: transaction.transaction_status,
+        timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+      };
+    });
   },
 
   getDefaultRiceInventory() {
@@ -334,11 +351,17 @@ const SHARED_DATA = {
           (item) => item.name === current.variety,
         );
         const apiPayload = {
+          client_transaction_id: String(current.id),
           rice_type_id: match ? Number(match.rice_type_id || 1) : 1,
           quantity_bought: Number(current.kilos || 0),
           price_per_unit: Number(current.pricePerKilo || 0),
+          total_price: Number(current.total || 0),
           payment_method: current.paymentMethod || "cash",
           transaction_status: current.status || "completed",
+          transaction_timestamp: new Date(Number(current.timestamp))
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " "),
         };
 
         const response = current.apiId
@@ -351,14 +374,15 @@ const SHARED_DATA = {
               body: JSON.stringify(apiPayload),
             });
 
-        if (!response?.success || current.apiId) return;
+        if (!response?.success) return;
         const latest = this.getKioskTransactions().find(
           (item) => item.id === transactionId,
         );
         if (latest) {
           this.storeKioskTransaction({
             ...latest,
-            apiId: response.transaction_id,
+            apiId: response.transaction_id || latest.apiId,
+            syncedStatus: current.status,
           });
         }
       });
@@ -382,6 +406,18 @@ const SHARED_DATA = {
     if (!payload) return false;
     await this.queueKioskTransactionSync(payload.id);
     return true;
+  },
+
+  syncUnsyncedKioskTransactions() {
+    const unsynced = this.getKioskTransactions().filter(
+      (transaction) =>
+        !transaction.apiId || transaction.syncedStatus !== transaction.status,
+    );
+    return Promise.all(
+      unsynced.map((transaction) =>
+        this.queueKioskTransactionSync(transaction.id),
+      ),
+    );
   },
 
   /**
