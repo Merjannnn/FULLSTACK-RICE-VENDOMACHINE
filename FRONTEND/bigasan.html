@@ -792,14 +792,7 @@
                 dot: "#7A5230",
               },
             };
-      const STAGES = ["select", "pay", "place", "dispense", "done"];
-      const STAGE_LABELS = {
-        select: "select",
-        pay: "pay",
-        place: "place jar",
-        dispense: "dispense",
-        done: "done",
-      };
+      const STAGES = ["select", "pay", "place jar", "dispense", "done"];
       const MIN_QUANTITY_KG = 1;
       const MAX_PAYMENT = 2000;
 
@@ -813,7 +806,7 @@
         paymentTransactionId: null,
         paymentTimestamp: null,
         autoDetectingPayment: false,
-        motorStatus: "not connected",
+        motorStatus: "",
         serialMessage: "Waiting for a bill or coin signal...",
       };
       let muted = false;
@@ -823,6 +816,7 @@
       let serialWriter = null;
       let serialTextBuffer = "";
       let serialConnected = false;
+      let dispenseCompleted = false;
 
       async function sendSerialCommand(command) {
         if (!serialPort || !serialPort.writable) {
@@ -868,6 +862,8 @@
       }
 
       function finishDispensing() {
+        if (state.step !== "dispense" || dispenseCompleted) return;
+        dispenseCompleted = true;
         clearInterval(dispenseTimer);
         const r = RICE[state.rice];
         state.weight = Number(state.targetWeight.toFixed(2));
@@ -897,6 +893,20 @@
         renderScreen();
       }
 
+      function formatSerialError(line) {
+        const code = line
+          .trim()
+          .replace(/^ERROR:/i, "")
+          .trim();
+        if (code === "MOTOR_CLOSE_LIMIT_NOT_REACHED") {
+          return "Motor did not reach the closed-position switch. Ask the operator to check the limit switch and wiring.";
+        }
+        if (code === "DISPENSE_NO_WEIGHT_PROGRESS") {
+          return "No rice weight was detected. Ask the operator to check the load cell and dispenser.";
+        }
+        return `Machine error: ${code.replace(/_/g, " ").toLowerCase()}`;
+      }
+
       async function connectSerial() {
         if (!("serial" in navigator)) {
           say(
@@ -911,7 +921,6 @@
           serialReader = serialPort.readable.getReader();
           serialWriter = serialPort.writable.getWriter();
           serialConnected = true;
-          state.motorStatus = "connected";
           state.autoDetectingPayment = true;
           renderScreen();
           say("Cash acceptor connected.");
@@ -969,13 +978,7 @@
 
               const motorStartMatch = line.match(/^MOTOR_START:\s*(\d+)/i);
               if (motorStartMatch && state.step === "dispense") {
-                state.motorStatus = `motor ${motorStartMatch[1]} running`;
                 state.serialMessage = `Motor ${motorStartMatch[1]} started`;
-                renderScreen();
-              }
-
-              if (/^MOTOR_STOPPING_FOR_TARGET$/i.test(line.trim())) {
-                state.motorStatus = "stopping at target";
                 renderScreen();
               }
 
@@ -987,26 +990,37 @@
               if (/^MOTOR_STOPPED$/i.test(line.trim())) {
                 state.motorStatus = "stopped";
                 renderScreen();
+                if (state.step === "dispense") {
+                  finishDispensing();
+                }
+              }
+
+              if (/^MOTOR_CLOSE_LIMIT_REACHED$/i.test(line.trim())) {
+                state.motorStatus = "fully closed";
+                renderScreen();
+                if (state.step === "dispense") {
+                  finishDispensing();
+                }
               }
 
               if (
                 /^CYCLE_DONE$/i.test(line.trim()) &&
                 state.step === "dispense"
               ) {
-                finishDispensing();
+                state.motorStatus = "stopped";
+                renderScreen();
               }
 
               if (/^ERROR:/i.test(line.trim())) {
-                state.motorStatus = "driver error";
+                state.motorStatus = formatSerialError(line);
                 renderScreen();
-                say(line.trim());
+                say(state.motorStatus);
               }
             }
           }
         } catch (err) {
           console.error("Serial connection failed:", err);
           serialConnected = false;
-          state.motorStatus = "not connected";
           if (serialWriter) {
             try {
               serialWriter.releaseLock();
@@ -1064,9 +1078,10 @@
       /* ---------- stage rail ---------- */
       function renderStageRail() {
         const rail = document.getElementById("stageRail");
-        const order = STAGES;
-        const currentIndex =
-          state.step === "idle" ? 0 : Math.max(0, order.indexOf(state.step));
+        const order = ["select", "pay", "place jar", "dispense", "done"];
+        const currentIndex = order.indexOf(
+          state.step === "idle" ? "select" : state.step,
+        );
         rail.innerHTML = order
           .map((label, i) => {
             let cls = "stage";
@@ -1074,7 +1089,7 @@
               if (i < currentIndex) cls += " done";
               else if (i === currentIndex) cls += " active";
             }
-            return `<div class="${cls}"><div class="dot"></div>${STAGE_LABELS[label]}</div>`;
+            return `<div class="${cls}"><div class="dot"></div>${label}</div>`;
           })
           .join("");
       }
@@ -1237,7 +1252,7 @@
       <div class="jar"><div class="jar-fill" style="height:${pct}%; background-color:${r.color}"></div></div>
       <div class="weight-readout">${Number(state.weight || 0).toFixed(2)} kg</div>
       <div class="weight-target">target ${state.targetWeight.toFixed(2)} kg</div>
-      <div class="motor-status">● ${state.motorStatus}</div>
+      <div class="motor-status">● ${state.motorStatus || (pct < 100 ? "motor running" : "motor stopped")}</div>
     </div>
   `;
       }
@@ -1332,6 +1347,7 @@
           state.containerPlaced = true;
           say("Container detected. Starting dispensing now.");
           setTimeout(() => {
+            dispenseCompleted = false;
             state.step = "dispense";
             renderScreen();
             startDispensing();
@@ -1348,7 +1364,6 @@
             paymentTransactionId: null,
             paymentTimestamp: null,
             autoDetectingPayment: false,
-            motorStatus: "not connected",
             serialMessage: "Waiting for a bill or coin signal...",
           };
           say("Tap the screen to begin your rice purchase.");
@@ -1357,30 +1372,36 @@
         renderScreen();
       }
 
-      async function startDispensing() {
-        if (!serialConnected || !serialPort || !serialPort.writable) {
-          state.motorStatus = "not connected - use the power button";
-          renderScreen();
-          say("Connect the Arduino with the power button before dispensing.");
+      function startDispensing() {
+        if (serialPort) {
+          sendSerialCommand(
+            `DISPENSE:${RICE[state.rice].name}:${state.targetWeight.toFixed(2)}`,
+          ).catch((err) => {
+            console.error("Failed to start dispenser:", err);
+            say(
+              "The dispenser could not be started. Check the Arduino connection.",
+            );
+          });
           return;
         }
 
-        state.motorStatus = "starting";
-        renderScreen();
-        try {
-          const sent = await sendSerialCommand(
-            `DISPENSE:${RICE[state.rice].name}:${state.targetWeight.toFixed(2)}`,
-          );
-          if (!sent)
-            throw new Error("Arduino serial connection is unavailable");
-        } catch (err) {
-          console.error("Failed to start dispenser:", err);
-          state.motorStatus = "command failed - check Arduino connection";
+        const targetKg = Number(state.targetWeight || 0);
+        const durationMs = 3600;
+        const stepMs = 60;
+        const totalSteps = durationMs / stepMs;
+        let i = 0;
+        clearInterval(dispenseTimer);
+        dispenseTimer = setInterval(() => {
+          i++;
+          // ease-out curve so it settles precisely at target
+          const t = Math.min(1, i / totalSteps);
+          const eased = 1 - Math.pow(1 - t, 2);
+          state.weight = Number((targetKg * eased).toFixed(2));
           renderScreen();
-          say(
-            "The dispenser could not be started. Check the Arduino connection.",
-          );
-        }
+          if (t >= 1) {
+            finishDispensing();
+          }
+        }, stepMs);
       }
 
       function syncRiceInventoryFromShared() {
