@@ -11,6 +11,7 @@ const SHARED_DATA = {
   CONTROL_PANEL_STATE_KEY: "bigasan_control_panel_state",
   RICE_INVENTORY_KEY: "bigasan_rice_inventory",
   transactionSyncQueue: Promise.resolve(),
+  apiFailureCooldown: 0,
 
   async apiRequest(path, options = {}) {
     try {
@@ -27,9 +28,17 @@ const SHARED_DATA = {
         throw new Error(payload.error || `Request failed: ${response.status}`);
       }
 
+      this.apiFailureCooldown = 0;
       return await response.json();
     } catch (error) {
-      console.warn(`API request failed for ${path}:`, error.message);
+      const now = Date.now();
+      if (
+        now - this.apiFailureCooldown > 30000 ||
+        this.apiFailureCooldown === 0
+      ) {
+        console.warn(`API request failed for ${path}:`, error.message);
+        this.apiFailureCooldown = now;
+      }
       return null;
     }
   },
