@@ -901,6 +901,9 @@
         if (code === "MOTOR_CLOSE_LIMIT_NOT_REACHED") {
           return "Motor did not reach the closed-position switch. Ask the operator to check the limit switch and wiring.";
         }
+        if (code === "MOTOR_CLOSE_LIMIT_STUCK_ACTIVE") {
+          return "The closed-position switch stayed active during dispensing. Check that it releases while the gate opens.";
+        }
         if (code === "DISPENSE_NO_WEIGHT_PROGRESS") {
           return "No rice weight was detected. Ask the operator to check the load cell and dispenser.";
         }
