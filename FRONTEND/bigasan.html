@@ -1201,8 +1201,6 @@
       function payView() {
         const r = RICE[state.rice];
         const weight = state.amount > 0 ? state.amount / r.price : 0;
-        const minimumPayment = r.price * MIN_QUANTITY_KG;
-        const amountRemaining = Math.max(0, minimumPayment - state.amount);
         const overMax = state.amount > MAX_PAYMENT;
         const detectionText = state.autoDetectingPayment
           ? "Detecting inserted coins and bills..."
@@ -1213,17 +1211,17 @@
         return `
     <div class="eyebrow">Step 2 of 4</div>
     <h1 class="step-title">Insert payment</h1>
-    <p class="step-sub">${r.name} — ₱${r.price} per kg. Minimum purchase: ${MIN_QUANTITY_KG} kg (₱${minimumPayment}).</p>
+    <p class="step-sub">${r.name} — ₱${r.price} per kg. You may pay any amount above ₱0 up to ₱${MAX_PAYMENT}.</p>
     <div class="amount-display">
       <div class="amount-value">₱${state.amount}</div>
-      <div class="weight-preview">${state.amount > 0 ? "≈ " + weight.toFixed(2) + " kg will be dispensed" : "&nbsp;"}</div>
-      <div class="amount-hint ${overMax || amountRemaining > 0 ? "warn" : ""}">${overMax ? `Maximum accepted amount is ₱${MAX_PAYMENT}` : amountRemaining > 0 ? `Minimum required: ₱${minimumPayment} for ${MIN_QUANTITY_KG} kg (insert ₱${amountRemaining} more)` : detectionText}</div>
+      <div class="weight-preview">${state.amount > 0 ? "≈ " + weight.toFixed(2) + " kg (" + (weight * 1000).toFixed(0) + " g) of rice will be dispensed" : "&nbsp;"}</div>
+      <div class="amount-hint ${overMax || state.amount <= 0 ? "warn" : ""}">${overMax ? `Maximum accepted amount is ₱${MAX_PAYMENT}` : state.amount <= 0 ? "Insert cash to continue." : detectionText}</div>
     </div>
     <div class="row-label" style="margin-top: 10px;">Payment status</div>
     <div class="pay-buttons" style="grid-template-columns: 1fr; margin-top: 8px;">
       <div class="pay-chip" style="background: rgba(58, 94, 76, 0.06); border-color: rgba(58, 94, 76, 0.15); color: var(--success-600); cursor: default;">${state.autoDetectingPayment ? "Reading acceptors..." : state.amount > 0 ? "Acceptors ready" : "Waiting for cash"}</div>
     </div>
-    <button class="primary-btn" data-action="confirm-payment" ${state.amount >= minimumPayment && state.amount <= MAX_PAYMENT ? "" : "disabled"}>Confirm ₱${state.amount}</button>
+    <button class="primary-btn" data-action="confirm-payment" ${state.amount > 0 && state.amount <= MAX_PAYMENT ? "" : "disabled"}>Confirm ₱${state.amount}</button>
     <button class="ghost-btn" data-action="back-select">Back</button>
   `;
       }
@@ -1332,10 +1330,9 @@
           );
         } else if (action === "confirm-payment") {
           const r = RICE[state.rice];
-          const minimumPayment = r.price * MIN_QUANTITY_KG;
-          if (state.amount < minimumPayment || state.amount > MAX_PAYMENT) {
+          if (state.amount <= 0 || state.amount > MAX_PAYMENT) {
             say(
-              `The minimum order is 1 kilogram. Please insert at least ₱${minimumPayment}.`,
+              "Please insert cash before continuing. The payment must be greater than zero and within the accepted limit.",
             );
             return;
           }
