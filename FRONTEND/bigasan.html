@@ -294,6 +294,16 @@
       .tap-btn:active {
         transform: translateY(0px) scale(0.98);
       }
+      .tap-btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+        box-shadow: none;
+      }
+      .tap-btn:disabled:hover,
+      .tap-btn:disabled:active {
+        transform: none;
+        box-shadow: none;
+      }
       .idle-note {
         font-size: 11.5px;
         color: var(--ink-600);
@@ -801,6 +811,8 @@
         rice: null,
         amount: 0,
         containerPlaced: false,
+        containerDetected: false,
+        containerSensorKnown: false,
         weight: 0,
         targetWeight: 0,
         paymentTransactionId: null,
@@ -924,13 +936,22 @@
           serialReader = serialPort.readable.getReader();
           serialWriter = serialPort.writable.getWriter();
           serialConnected = true;
+          state.containerDetected = false;
+          state.containerSensorKnown = false;
           state.autoDetectingPayment = true;
           renderScreen();
-          say("Cash acceptor connected.");
+          await sendSerialCommand("GET_CONTAINER");
+          say("Machine connected. Checking the container sensor.");
 
           while (true) {
             const { value, done } = await serialReader.read();
-            if (done) break;
+            if (done) {
+              serialConnected = false;
+              state.containerDetected = false;
+              state.containerSensorKnown = false;
+              renderScreen();
+              break;
+            }
 
             serialTextBuffer += new TextDecoder().decode(value);
             const lines = serialTextBuffer.split(/\r?\n/);
@@ -946,6 +967,16 @@
                 /^(?:TOTAL:\s*(?:PHP\s*)?|Total Money:\s*PHP\s*)(\d+)/i,
               );
               const weightMatch = line.match(/^WEIGHT:\s*([\d.]+)/i);
+              const containerMatch = line.match(
+                /^CONTAINER:(DETECTED|EMPTY)$/i,
+              );
+
+              if (containerMatch) {
+                state.containerSensorKnown = true;
+                state.containerDetected =
+                  containerMatch[1].toUpperCase() === "DETECTED";
+                if (state.step === "place") renderScreen();
+              }
 
               if (paymentMatch || totalMatch) {
                 const total = totalMatch
@@ -1024,6 +1055,9 @@
         } catch (err) {
           console.error("Serial connection failed:", err);
           serialConnected = false;
+          state.containerDetected = false;
+          state.containerSensorKnown = false;
+          renderScreen();
           if (serialWriter) {
             try {
               serialWriter.releaseLock();
@@ -1037,7 +1071,7 @@
           serialWriter = null;
           serialReader = null;
           say(
-            "Unable to connect to the cash acceptor. Check the Arduino connection and try again.",
+            "Unable to connect to the machine. Check the Arduino connection and try again.",
           );
         }
       }
@@ -1227,14 +1261,25 @@
       }
 
       function placeView() {
+        const containerDetected =
+          serialConnected &&
+          state.containerSensorKnown &&
+          state.containerDetected;
+        const sensorStatus = !serialConnected
+          ? "MACHINE DISCONNECTED"
+          : !state.containerSensorKnown
+            ? "CHECKING CONTAINER SENSOR"
+            : containerDetected
+              ? "CONTAINER DETECTED"
+              : "WAITING FOR CONTAINER";
         return `
     <div class="eyebrow">Step 3 of 4</div>
     <h1 class="step-title">Place your container</h1>
-    <p class="step-sub">Position your container under the dispensing chute. The infrared sensor checks it's in place before dispensing.</p>
+    <p class="step-sub">Position your container under the dispensing chute. The infrared sensor must detect it before you can start dispensing.</p>
     <div class="sensor-wrap">
-      <div class="ir-icon">${state.containerPlaced ? "📦" : "🫙"}</div>
-      <div class="sensor-badge ${state.containerPlaced ? "ok" : ""}">${state.containerPlaced ? "CONTAINER DETECTED" : "WAITING FOR CONTAINER"}</div>
-      <button class="tap-btn" data-action="place-container" ${state.containerPlaced ? "disabled" : ""}>${state.containerPlaced ? "Detected" : "Simulate placing container"}</button>
+      <div class="ir-icon">${containerDetected ? "📦" : "🫙"}</div>
+      <div class="sensor-badge ${containerDetected ? "ok" : ""}">${sensorStatus}</div>
+      <button class="tap-btn" data-action="place-container" ${containerDetected ? "" : "disabled"}>Simulate placing container</button>
     </div>
   `;
       }
@@ -1344,9 +1389,28 @@
         } else if (action === "back-select") {
           state.step = "select";
         } else if (action === "place-container") {
+          if (
+            !serialConnected ||
+            !state.containerSensorKnown ||
+            !state.containerDetected
+          ) {
+            say("The machine must detect your container before dispensing.");
+            return;
+          }
           state.containerPlaced = true;
           say("Container detected. Starting dispensing now.");
           setTimeout(() => {
+            if (
+              !serialConnected ||
+              !state.containerSensorKnown ||
+              !state.containerDetected
+            ) {
+              state.containerPlaced = false;
+              state.step = "place";
+              say("Container detection was lost. Please reposition it.");
+              renderScreen();
+              return;
+            }
             dispenseCompleted = false;
             state.step = "dispense";
             renderScreen();
@@ -1359,6 +1423,8 @@
             rice: null,
             amount: 0,
             containerPlaced: false,
+            containerDetected: state.containerDetected,
+            containerSensorKnown: state.containerSensorKnown,
             weight: 0,
             targetWeight: 0,
             paymentTransactionId: null,
